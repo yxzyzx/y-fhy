@@ -156,7 +156,13 @@ onMounted(async()=>{ const savedContact=localStorage.getItem(contactStorageKey);
       </section>
     </div>
   </main>
-  <footer><a href="/admin">後台管理</a></footer>
+  <footer>
+    <section class="line-contact" aria-label="LINE 聯絡方式">
+      <p>LINE 聯絡方式</p>
+      <img src="/line-contact.jpg" alt="LINE 聯絡方式 QR Code">
+    </section>
+    <a href="/admin">後台管理</a>
+  </footer>
   <div v-if="editMy.open" class="admin-overlay"><form class="admin-create-card" @submit.prevent="saveMine"><button type="button" class="admin-close" @click="editMy.open=false">×</button><h2>修改預約</h2><div class="edit-services"><button v-for="service in serviceOptions" :key="service.id" type="button" :class="{active:editMy.selectedServices.includes(service.id)}" @click="toggleEditService(service.id)">{{ service.name }}</button></div><div class="two"><label>日期<input v-model="editMy.date" type="date" :min="toKey(today)" required></label><label>開始時間<select v-model="editMy.startTime" required><option v-for="time in editAvailableTimes" :key="time">{{ time }}</option></select></label></div><div class="two"><label>姓名<input v-model="editMy.name" required></label><label>聯絡電話<input v-model="editMy.phone" required></label></div><label>備註<input v-model="editMy.note"></label><p v-if="editMy.message" class="message">{{ editMy.message }}</p><button class="primary">儲存修改</button></form></div>
   </div>
   <div v-else class="admin-page">
