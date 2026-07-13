@@ -1,0 +1,5 @@
+[
+  {"id":"hands","name":"手部美甲","caption":"","minutes":120,"price":1200,"showPrice":false},
+  {"id":"feet","name":"足部美甲","caption":"","minutes":120,"price":1500,"showPrice":false},
+  {"id":"removal","name":"卸甲","caption":"","minutes":30,"price":500,"showPrice":false}
+]
