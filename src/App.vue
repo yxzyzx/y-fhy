@@ -12,6 +12,7 @@ const importSetupOpen=ref(false),exportConfirmOpen=ref(false)
 const adminDetail=ref(null)
 const editMy=reactive({open:false,id:'',date:'',startTime:'',selectedServices:[],name:'',phone:'',note:'',message:''})
 const form = reactive({ selectedServices: ['hands'], date: '', startTime: '', name: '', phone: '', note: '' })
+const contactStorageKey = 'nailBookingContact'
 const today = new Date(); today.setHours(0, 0, 0, 0)
 const toKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 const addDays = (d, n) => { const next = new Date(d); next.setDate(next.getDate()+n); return next }
@@ -50,6 +51,9 @@ const canMovePrevious = computed(() => adminMode.value || monthCursor.value > ne
 const totalBooked = computed(() => bookings.value.filter(b=>days.value.some(d=>toKey(d)===b.date)).length)
 
 watch([() => form.date, duration], () => { if (!availableTimes.value.includes(form.startTime)) form.startTime = availableTimes.value[0] || '' })
+watch([() => form.name, () => form.phone], ([name,phone]) => {
+  if(name||phone) localStorage.setItem(contactStorageKey,JSON.stringify({name,phone}))
+})
 function toggleService(id){ const i=form.selectedServices.indexOf(id); if(i>=0 && form.selectedServices.length>1) form.selectedServices.splice(i,1); else if(i<0) form.selectedServices.push(id) }
 function selectDate(date){ form.date=toKey(date); document.querySelector('#booking-panel')?.scrollIntoView({behavior:'smooth',block:'start'}) }
 async function selectSlot(date,hour){ const chosen=`${String(hour).padStart(2,'0')}:00`; form.date=toKey(date); await nextTick(); form.startTime=availableTimes.value.includes(chosen)?chosen:(availableTimes.value[0]||''); document.querySelector('#booking-panel')?.scrollIntoView({behavior:'smooth',block:'start'}) }
@@ -66,7 +70,7 @@ async function submit(){
     const res=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...form,ownerToken})})
     const body=await res.json(); if(!res.ok) throw new Error(body.message)
     bookings.value.push(body); myBookings.value.push(body); message.value=`預約成功！已為妳保留 ${form.date} ${form.startTime}–${body.endTime}。`
-    form.name=''; form.phone=''; form.note=''; form.startTime=''
+    form.note=''; form.startTime=''
   }catch(error){ message.value=error.message } finally{submitting.value=false}
 }
 async function adminLogin(){adminMessage.value='';try{const res=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:adminPassword.value})});if(!res.ok){adminMessage.value='密碼不正確。';localStorage.removeItem('nailAdminPassword');return}localStorage.setItem('nailAdminPassword',adminPassword.value);adminLoggedIn.value=true;await loadAdmin()}catch{if(localStorage.getItem('nailAdminBackup')&&localStorage.getItem('nailAdminPassword')===adminPassword.value){adminLoggedIn.value=true;await loadAdmin()}else adminMessage.value='目前無法連線，也沒有可用的本地備份。'}}
@@ -81,7 +85,7 @@ async function saveSettings(){adminMessage.value='';const res=await fetch('/api/
 async function importGoogle(){importing.value=true;importMessage.value='';try{const res=await fetch('/api/admin/import-google',{method:'POST',headers:{'Content-Type':'application/json','x-admin-password':adminPassword.value},body:JSON.stringify({url:settings.googleSheetUrl,year:importYear.value})});const body=await res.json();if(!res.ok)throw new Error(body.message);importPreview.value=body.records.map(record=>({...record,selected:record.status==='ready'}));importSetupOpen.value=false;importOpen.value=true}catch(error){importMessage.value=error.message}finally{importing.value=false}}
 async function confirmGoogleImport(){const selected=importPreview.value.filter(r=>r.selected&&r.status==='ready');if(!selected.length){importMessage.value='沒有選擇可匯入的資料。';return}confirmingImport.value=true;try{const res=await fetch('/api/admin/confirm-import',{method:'POST',headers:{'Content-Type':'application/json','x-admin-password':adminPassword.value},body:JSON.stringify({records:selected})});const body=await res.json();if(!res.ok)throw new Error(body.message);importOpen.value=false;importMessage.value=`已匯入 ${body.imported} 筆${body.skipped?`，另有 ${body.skipped} 筆因最新衝突而跳過`:''}。`;await Promise.all([loadAdmin(),loadBookings()])}catch(error){importMessage.value=error.message}finally{confirmingImport.value=false}}
 function closeAdmin(){location.href='/'}
-onMounted(async()=>{ form.date=toKey(today);const [servicesData,settingsData]=await Promise.all([fetch('/api/services').then(r=>r.json()),fetch('/api/settings').then(r=>r.json())]);serviceOptions.value=servicesData;Object.assign(settings,settingsData);form.selectedServices=[serviceOptions.value[0]?.id].filter(Boolean); await Promise.all([loadBookings(),loadMine()]); if(adminMode.value){const saved=localStorage.getItem('nailAdminPassword');if(saved){adminPassword.value=saved;await adminLogin()}} })
+onMounted(async()=>{ const savedContact=localStorage.getItem(contactStorageKey);if(savedContact){try{const contact=JSON.parse(savedContact);form.name=contact.name||'';form.phone=contact.phone||''}catch{localStorage.removeItem(contactStorageKey)}}form.date=toKey(today);const [servicesData,settingsData]=await Promise.all([fetch('/api/services').then(r=>r.json()),fetch('/api/settings').then(r=>r.json())]);serviceOptions.value=servicesData;Object.assign(settings,settingsData);form.selectedServices=[serviceOptions.value[0]?.id].filter(Boolean); await Promise.all([loadBookings(),loadMine()]); if(adminMode.value){const saved=localStorage.getItem('nailAdminPassword');if(saved){adminPassword.value=saved;await adminLogin()}} })
 </script>
 
 <template>
