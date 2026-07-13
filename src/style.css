@@ -151,7 +151,7 @@ footer a:hover { color: var(--clay); }
 .booking-bottom { display: grid; grid-template-columns: 1.1fr 1.7fr 190px; gap: 12px; align-items: end; }
 .booking-bottom .time-summary { min-height: 47px; align-items: center; }
 .booking-bottom .time-summary.vertical { flex-direction: column; align-items: flex-start; justify-content: center; gap: 5px; }
-.schedule-table.transposed { grid-template-columns: 92px repeat(26, minmax(46px, 1fr)); min-width: 1288px; }
+.schedule-table.transposed { grid-template-columns: 92px repeat(26, 64px); min-width: 1756px; }
 .transposed .corner, .time-head { height: 58px; border: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #faf8f6; display: grid; place-items: center; color: #998f88; font-size: 11px; letter-spacing: .04em; }
 .transposed .time-head { grid-column: span 2; }
 .date-row-head { height: 78px; border: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #faf8f6; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #6d6661; }
@@ -173,7 +173,7 @@ footer a:hover { color: var(--clay); }
   .booking-intro .muted { margin: 8px 0 0; }
   .booking-fields, .booking-bottom { grid-template-columns: 1fr; }
   .booking-bottom .submit { grid-column: auto; }
-  .schedule-table.transposed { grid-template-columns: 76px repeat(26, 44px); min-width: 1220px; }
+  .schedule-table.transposed { grid-template-columns: 76px repeat(26, 60px); min-width: 1636px; }
   .content-stack { gap: 16px; }
   .my-bookings { grid-template-columns: 1fr; gap: 14px; padding: 20px; }
   .my-booking-list article,.my-booking-list article div { align-items: flex-start; }
