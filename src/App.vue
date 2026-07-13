@@ -194,7 +194,7 @@ onMounted(async()=>{
             <template v-for="day in days" :key="toKey(day)">
               <button class="date-row-head" :class="{today:toKey(day)===toKey(today),selected:form.date===toKey(day)}" @click="selectDate(day)"><b>週{{ weekdays[day.getDay()] }}</b><span>{{ day.getMonth()+1 }}/{{ day.getDate() }}</span></button>
               <button v-for="cell in scheduleCells(day,bookings)" :key="cell.key" class="slot merged-slot" :class="cell.booking?'booked':'available'" :style="{gridColumn:`span ${cell.span}`}" :disabled="!!cell.booking" @click="selectSlot(day,cell.start)">
-                <template v-if="cell.booking"><span class="booking-text"><b>{{ cell.booking.type==='leave'?'休假':'已被預約' }}</b><small>{{ cell.booking.startTime }}–{{ cell.booking.endTime }}</small></span></template>
+                <template v-if="cell.booking"><span class="booking-text public-booking-text"><b>{{ cell.booking.type==='leave'?'休假':'已約' }}</b></span></template>
                 <span v-else>{{ minutesToTime(cell.start) }}</span>
               </button>
             </template>

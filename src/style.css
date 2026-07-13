@@ -474,6 +474,11 @@ h2 {
   margin-top: 5px;
   line-height: 1.35;
 }
+.public-booking-text {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
 .continuing {
   opacity: 0.4;
 }
