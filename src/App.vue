@@ -17,7 +17,11 @@ const toKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}
 const addDays = (d, n) => { const next = new Date(d); next.setDate(next.getDate()+n); return next }
 const weekdays = ['日','一','二','三','四','五','六']
 const monthCursor = ref(new Date(today.getFullYear(),today.getMonth(),1))
-const days = computed(() => {const year=monthCursor.value.getFullYear(),month=monthCursor.value.getMonth(),count=new Date(year,month+1,0).getDate();return Array.from({length:count},(_,i)=>new Date(year,month,i+1))})
+const days = computed(() => {
+  const year=monthCursor.value.getFullYear(),month=monthCursor.value.getMonth(),count=new Date(year,month+1,0).getDate()
+  const monthDays=Array.from({length:count},(_,i)=>new Date(year,month,i+1))
+  return adminMode.value ? monthDays : monthDays.filter(day=>day>=today)
+})
 const hours = Array.from({ length: 13 }, (_, i) => 9 + i)
 const duration = computed(() => form.selectedServices.reduce((sum, id) => sum + (serviceOptions.value.find(s => s.id === id)?.minutes||0), 0))
 const pricedSelections = computed(() => form.selectedServices.map(id=>serviceOptions.value.find(s=>s.id===id)).filter(s=>s && s.showPrice!==false))
@@ -42,13 +46,14 @@ const availableTimes = computed(() => {
 const editDuration=computed(()=>editMy.selectedServices.reduce((sum,id)=>sum+(serviceOptions.value.find(s=>s.id===id)?.minutes||0),0))
 const editAvailableTimes=computed(()=>{if(!editMy.date||!editDuration.value)return[];const result=[];for(let start=540;start<=1200&&start+editDuration.value<=1320;start+=30){if(!bookings.value.some(b=>b.id!==editMy.id&&b.date===editMy.date&&start<timeToMinutes(b.endTime)&&timeToMinutes(b.startTime)<start+editDuration.value))result.push(minutesToTime(start))}return result})
 const monthLabel = computed(() => `${monthCursor.value.getFullYear()}年 ${monthCursor.value.getMonth()+1}月`)
+const canMovePrevious = computed(() => adminMode.value || monthCursor.value > new Date(today.getFullYear(),today.getMonth(),1))
 const totalBooked = computed(() => bookings.value.filter(b=>days.value.some(d=>toKey(d)===b.date)).length)
 
 watch([() => form.date, duration], () => { if (!availableTimes.value.includes(form.startTime)) form.startTime = availableTimes.value[0] || '' })
 function toggleService(id){ const i=form.selectedServices.indexOf(id); if(i>=0 && form.selectedServices.length>1) form.selectedServices.splice(i,1); else if(i<0) form.selectedServices.push(id) }
 function selectDate(date){ form.date=toKey(date); document.querySelector('#booking-panel')?.scrollIntoView({behavior:'smooth',block:'start'}) }
 async function selectSlot(date,hour){ const chosen=`${String(hour).padStart(2,'0')}:00`; form.date=toKey(date); await nextTick(); form.startTime=availableTimes.value.includes(chosen)?chosen:(availableTimes.value[0]||''); document.querySelector('#booking-panel')?.scrollIntoView({behavior:'smooth',block:'start'}) }
-function moveMonth(amount){monthCursor.value=new Date(monthCursor.value.getFullYear(),monthCursor.value.getMonth()+amount,1)}
+function moveMonth(amount){if(amount<0&&!canMovePrevious.value)return;monthCursor.value=new Date(monthCursor.value.getFullYear(),monthCursor.value.getMonth()+amount,1)}
 async function loadBookings(){loading.value=true;try{const res=await fetch('/api/bookings');if(!res.ok)throw new Error();bookings.value=await res.json();localStorage.setItem('nailBookingsBackup',JSON.stringify(bookings.value));offlineData.value=false}catch{const backup=localStorage.getItem('nailBookingsBackup');bookings.value=backup?JSON.parse(backup):[];offlineData.value=!!backup}finally{loading.value=false}}
 async function loadMine(){let list=[];try{const res=await fetch('/api/my-bookings',{headers:{'x-owner-token':ownerToken}});if(!res.ok)throw new Error();list=await res.json();localStorage.setItem('nailMyBookingsBackup',JSON.stringify(list))}catch{const backup=localStorage.getItem('nailMyBookingsBackup');list=backup?JSON.parse(backup):[]}myBookings.value=list.filter(b=>new Date(`${b.date}T${b.endTime}:00`) > new Date()).sort((a,b)=>`${a.date}${a.startTime}`.localeCompare(`${b.date}${b.startTime}`))}
 async function cancelMine(id){ if(!confirm('確定要取消這筆預約嗎？'))return; const res=await fetch(`/api/my-bookings/${id}`,{method:'DELETE',headers:{'x-owner-token':ownerToken}}); if(res.ok){await Promise.all([loadMine(),loadBookings()])} }
@@ -100,7 +105,7 @@ onMounted(async()=>{ form.date=toKey(today);const [servicesData,settingsData]=aw
         </form>
       </aside>
       <section class="schedule-card">
-        <div class="section-head"><div class="schedule-title"><h2>預約表</h2><span v-if="offlineData" class="offline-badge">離線資料</span></div><div class="week-nav"><button @click="moveMonth(-1)" aria-label="上個月">←</button><span>{{ monthLabel }}</span><button @click="moveMonth(1)" aria-label="下個月">→</button></div></div>
+        <div class="section-head"><div class="schedule-title"><h2>預約表</h2><span v-if="offlineData" class="offline-badge">離線資料</span></div><div class="week-nav"><button :disabled="!canMovePrevious" @click="moveMonth(-1)" aria-label="上個月">←</button><span>{{ monthLabel }}</span><button @click="moveMonth(1)" aria-label="下個月">→</button></div></div>
         <div class="table-wrap" :class="{loading}">
           <div class="schedule-table transposed">
             <div class="corner">日期</div><div v-for="hour in hours" :key="hour" class="time-head">{{ String(hour).padStart(2,'0') }}:00</div>

@@ -342,6 +342,10 @@ h2 {
   border-radius: 8px;
   background: #fff;
 }
+.week-nav button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
 .table-wrap {
   overflow: auto;
   transition: opacity 0.2s;
