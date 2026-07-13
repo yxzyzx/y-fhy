@@ -464,8 +464,7 @@ h2 {
 }
 .booking-card {
   padding: 28px;
-  position: sticky;
-  top: 108px;
+  position: static;
 }
 .muted {
   color: #8a827d;
