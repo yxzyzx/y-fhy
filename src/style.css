@@ -55,6 +55,7 @@ footer a:hover { color: var(--clay); }
 .admin-topbar .admin-nav-actions { gap: 8px; }
 .admin-label { color: #857d77; font-size: 13px; border-left: 1px solid var(--line); padding-left: 18px; }
 .admin-topbar button { border: 1px solid var(--line); border-radius: 9px; padding: 10px 14px; background: #fff; color: #625b57; }
+.admin-topbar .brand-home { border: 0; padding: 0; border-radius: 0; background: transparent; color: inherit; cursor: pointer; }
 .admin-topbar .nav-icon-button { width: 38px; height: 38px; padding: 0; display: grid; place-items: center; border-color: #d8e0d2; color: #65735d; font-size: 20px; line-height: 1; }
 .admin-topbar .nav-icon-button:hover { background: #edf3e8; border-color: #b9c7b0; }
 .admin-main { max-width: 1180px; margin: 0 auto; padding: 52px 32px 80px; }
@@ -132,7 +133,7 @@ footer a:hover { color: var(--clay); }
 .import-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
 
 @media (prefers-reduced-motion: reduce) { .announcement-track { animation: none; } }
-@media (max-width: 720px) { .admin-topbar .back-home-button { width: 38px; overflow: hidden; white-space: nowrap; padding-left: 11px; } .import-item { grid-template-columns: auto 62px 1fr; } .import-item > span:not(.import-status), .import-item small { grid-column: 3 / -1; } }
+@media (max-width: 720px) { .import-item { grid-template-columns: auto 62px 1fr; } .import-item > span:not(.import-status), .import-item small { grid-column: 3 / -1; } }
 .admin-create-card label { margin: 0; }
 .admin-create-card .primary { width: 100%; }
 .booking-card { position: static; padding: 30px; }
