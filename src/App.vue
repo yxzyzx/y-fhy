@@ -7,7 +7,7 @@ const settings=reactive({announcement:'',googleSheetUrl:''})
 const ownerToken = localStorage.getItem('nailOwnerToken') || crypto.randomUUID(); localStorage.setItem('nailOwnerToken', ownerToken)
 const adminMode=ref(location.pathname==='/admin'||location.pathname==='/admin/'),adminLoggedIn=ref(false),adminPassword=ref(''),adminMessage=ref(''),adminBookings=ref([]),adminServices=ref([])
 const adminCreate=reactive({open:false,mode:'booking',date:'',startTime:'09:00',endTime:'22:00',wholeDay:true,serviceId:'',name:'',phone:'',note:''})
-const importYear=ref(new Date().getFullYear()),importing=ref(false),confirmingImport=ref(false),importMessage=ref(''),importPreview=ref([]),importOpen=ref(false),importProgress=ref([])
+const importYear=ref(new Date().getFullYear()),importing=ref(false),confirmingImport=ref(false),importMessage=ref(''),importPreview=ref([]),importOpen=ref(false),importProgress=ref([]),importTask=ref(null),importPoller=ref(null)
 const importSetupOpen=ref(false),exportConfirmOpen=ref(false)
 const adminDetail=ref(null)
 const editMy=reactive({open:false,id:'',date:'',startTime:'',selectedServices:[],name:'',phone:'',note:'',message:''})
@@ -73,7 +73,7 @@ async function submit(){
     form.note=''; form.startTime=''
   }catch(error){ message.value=error.message } finally{submitting.value=false}
 }
-async function adminLogin(){adminMessage.value='';try{const res=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:adminPassword.value})});if(!res.ok){adminMessage.value='密碼不正確。';localStorage.removeItem('nailAdminPassword');return}localStorage.setItem('nailAdminPassword',adminPassword.value);adminLoggedIn.value=true;await loadAdmin()}catch{if(localStorage.getItem('nailAdminBackup')&&localStorage.getItem('nailAdminPassword')===adminPassword.value){adminLoggedIn.value=true;await loadAdmin()}else adminMessage.value='目前無法連線，也沒有可用的本地備份。'}}
+async function adminLogin(){adminMessage.value='';try{const res=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:adminPassword.value})});if(!res.ok){adminMessage.value='密碼不正確。';localStorage.removeItem('nailAdminPassword');return}localStorage.setItem('nailAdminPassword',adminPassword.value);adminLoggedIn.value=true;await loadAdmin();await loadImportTask()}catch{if(localStorage.getItem('nailAdminBackup')&&localStorage.getItem('nailAdminPassword')===adminPassword.value){adminLoggedIn.value=true;await loadAdmin()}else adminMessage.value='目前無法連線，也沒有可用的本地備份。'}}
 async function loadAdmin(){const h={'x-admin-password':adminPassword.value};try{const [settingsRes,bookingsRes,servicesRes]=await Promise.all([fetch('/api/settings'),fetch('/api/admin/bookings',{headers:h}),fetch('/api/services')]);if(!settingsRes.ok||!bookingsRes.ok||!servicesRes.ok)throw new Error();const [loadedSettings,loadedBookings,loadedServices]=await Promise.all([settingsRes.json(),bookingsRes.json(),servicesRes.json()]);Object.assign(settings,loadedSettings);adminBookings.value=loadedBookings;adminServices.value=loadedServices;localStorage.setItem('nailAdminBackup',JSON.stringify({settings:loadedSettings,bookings:loadedBookings,services:loadedServices,savedAt:new Date().toISOString()}));adminOfflineData.value=false}catch{const backup=localStorage.getItem('nailAdminBackup');if(!backup)throw new Error('目前無法連線，也沒有可用的本地備份。');const cached=JSON.parse(backup);Object.assign(settings,cached.settings||{});adminBookings.value=cached.bookings||[];adminServices.value=cached.services||[];adminOfflineData.value=true}}
 async function downloadExcel(silent=false){try{const res=await fetch('/api/admin/export-excel',{headers:{'x-admin-password':adminPassword.value}});if(!res.ok)throw new Error('Excel 匯出失敗。');const blob=await res.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`預約資料-${new Date().toISOString().slice(0,10)}.xlsx`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);exportConfirmOpen.value=false;if(!silent)adminMessage.value='Excel 已下載。'}catch(error){if(!silent)adminMessage.value=error.message}}
 function addService(){adminServices.value.push({id:crypto.randomUUID(),name:'',caption:'',minutes:60,price:0,showPrice:true})}
@@ -83,34 +83,38 @@ function adminCellClick(day,hour){const existing=adminBookingFor(day,hour);if(ex
 async function adminAddBooking(){adminMessage.value='';const endpoint=adminCreate.mode==='leave'?'/api/admin/leaves':'/api/admin/bookings';const payload=adminCreate.mode==='leave'?{date:adminCreate.date,startTime:adminCreate.wholeDay?'09:00':adminCreate.startTime,endTime:adminCreate.wholeDay?'22:00':adminCreate.endTime,note:adminCreate.note}:adminCreate;const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','x-admin-password':adminPassword.value},body:JSON.stringify(payload)});const body=await res.json();if(!res.ok){adminMessage.value=body.message;return}adminCreate.open=false;await Promise.all([loadAdmin(),loadBookings()])}
 async function saveSettings(){adminMessage.value='';const res=await fetch('/api/admin/settings',{method:'PUT',headers:{'Content-Type':'application/json','x-admin-password':adminPassword.value},body:JSON.stringify(settings)});const body=await res.json();if(!res.ok){adminMessage.value=body.message;return false}Object.assign(settings,body);adminMessage.value='公告已儲存。';return true}
 function pushImportProgress(message,status='working'){importProgress.value.push({id:crypto.randomUUID(),message,status,time:new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit',second:'2-digit'})})}
+function applyImportTask(task){
+  importTask.value=task
+  importProgress.value=task?.progress||[]
+  importing.value=task?.status==='running'
+  if(task?.records?.length)importPreview.value=task.records.map(record=>({...record,selected:record.status==='ready'}))
+}
+async function loadImportTask(){
+  if(!adminLoggedIn.value)return
+  const res=await fetch('/api/admin/import-google/latest',{headers:{'x-admin-password':adminPassword.value}})
+  if(!res.ok)return
+  const task=await res.json()
+  applyImportTask(task)
+  if(task?.status==='running')startImportPolling();else stopImportPolling()
+}
+function startImportPolling(){
+  stopImportPolling()
+  importPoller.value=setInterval(loadImportTask,2500)
+}
+function stopImportPolling(){if(importPoller.value){clearInterval(importPoller.value);importPoller.value=null}}
 async function importGoogle(){
-  importing.value=true;importMessage.value='';importProgress.value=[];pushImportProgress('準備開始匯入…')
+  importing.value=true;importMessage.value='';importProgress.value=[];pushImportProgress('準備建立後台同步任務…')
   try{
     const res=await fetch('/api/admin/import-google',{method:'POST',headers:{'Content-Type':'application/json','x-admin-password':adminPassword.value},body:JSON.stringify({url:settings.googleSheetUrl,year:importYear.value})})
-    if(!res.ok){const body=await res.json();throw new Error(body.message)}
-    const reader=res.body?.getReader();if(!reader)throw new Error('瀏覽器不支援讀取匯入進度。')
-    const decoder=new TextDecoder();let buffer=''
-    while(true){
-      const {value,done}=await reader.read()
-      if(done)break
-      buffer+=decoder.decode(value,{stream:true})
-      const lines=buffer.split('\n');buffer=lines.pop()||''
-      for(const line of lines){
-        if(!line.trim())continue
-        const event=JSON.parse(line)
-        if(event.type==='progress')pushImportProgress(event.message,'working')
-        if(event.type==='error')throw new Error(event.message)
-        if(event.type==='done'){
-          pushImportProgress(event.message,'done')
-          importPreview.value=(event.records||[]).map(record=>({...record,selected:record.status==='ready'}))
-          importSetupOpen.value=false;importOpen.value=true
-        }
-      }
-    }
-  }catch(error){importMessage.value=error.message;pushImportProgress(error.message,'error')}finally{importing.value=false}
+    const body=await res.json();if(!res.ok&&!body.task)throw new Error(body.message)
+    applyImportTask(body.task||body)
+    importMessage.value=res.ok?'已建立後台同步任務，可以離開這個頁面。':body.message
+    startImportPolling()
+  }catch(error){importMessage.value=error.message;pushImportProgress(error.message,'error');importing.value=false}
 }
 async function confirmGoogleImport(){const selected=importPreview.value.filter(r=>r.selected&&r.status==='ready');if(!selected.length){importMessage.value='沒有選擇可匯入的資料。';return}confirmingImport.value=true;try{const res=await fetch('/api/admin/confirm-import',{method:'POST',headers:{'Content-Type':'application/json','x-admin-password':adminPassword.value},body:JSON.stringify({records:selected})});const body=await res.json();if(!res.ok)throw new Error(body.message);importOpen.value=false;importMessage.value=`已匯入 ${body.imported} 筆${body.skipped?`，另有 ${body.skipped} 筆因最新衝突而跳過`:''}。`;await Promise.all([loadAdmin(),loadBookings()])}catch(error){importMessage.value=error.message}finally{confirmingImport.value=false}}
 function closeAdmin(){location.href='/'}
+function openImportResult(){if(importTask.value?.records?.length){importPreview.value=importTask.value.records.map(record=>({...record,selected:record.status==='ready'}));importOpen.value=true}}
 onMounted(async()=>{ const savedContact=localStorage.getItem(contactStorageKey);if(savedContact){try{const contact=JSON.parse(savedContact);form.name=contact.name||'';form.phone=contact.phone||''}catch{localStorage.removeItem(contactStorageKey)}}form.date=toKey(today);const [servicesData,settingsData]=await Promise.all([fetch('/api/services').then(r=>r.json()),fetch('/api/settings').then(r=>r.json())]);serviceOptions.value=servicesData;Object.assign(settings,settingsData);form.selectedServices=[serviceOptions.value[0]?.id].filter(Boolean); await Promise.all([loadBookings(),loadMine()]); if(adminMode.value){const saved=localStorage.getItem('nailAdminPassword');if(saved){adminPassword.value=saved;await adminLogin()}} })
 </script>
 
@@ -161,6 +165,10 @@ onMounted(async()=>{ const savedContact=localStorage.getItem(contactStorageKey);
       <section v-if="!adminLoggedIn" class="admin-login-card"><h1>後台登入</h1><p>請輸入管理密碼以繼續。</p><form class="admin-login" @submit.prevent="adminLogin"><label>管理密碼<input v-model="adminPassword" type="password" autofocus required></label><button class="primary">登入後台</button></form><p v-if="adminMessage" class="message">{{ adminMessage }}</p></section>
       <template v-else>
         <div class="admin-heading"><div><div class="admin-heading-title"><h1>後台管理</h1><span v-if="adminOfflineData" class="offline-badge">離線資料</span></div><p>點選空白時段新增預約；點選已有預約即可取消。</p></div></div>
+        <section v-if="importTask" class="import-status-panel">
+          <div class="admin-title"><div><h2>上一次 Google 同步</h2><p>{{ importTask.status==='running'?'同步進行中':importTask.status==='done'?'同步已完成':'同步失敗' }}<template v-if="importTask.updatedAt"> ・ {{ new Date(importTask.updatedAt).toLocaleString('zh-TW') }}</template></p></div><button v-if="importTask.status==='done'&&importTask.records?.length" @click="openImportResult">查看辨識結果</button></div>
+          <div v-if="importProgress.length" class="import-progress compact-progress" aria-live="polite"><div v-for="item in importProgress" :key="item.id" class="import-progress-item" :class="item.status"><span>{{ item.time }}</span><b>{{ item.message }}</b></div></div>
+        </section>
         <section class="admin-panel standalone">
           <div class="admin-section first admin-settings"><div class="admin-title"><h2>公告</h2></div><label>前台公告<textarea v-model="settings.announcement" rows="3"></textarea></label><button class="primary save-settings" @click="saveSettings">儲存公告</button><p v-if="adminMessage" class="message">{{ adminMessage }}</p></div>
           <div class="admin-section"><div class="admin-title"><h2>服務項目</h2><button @click="addService">＋ 新增項目</button></div><div class="admin-service" v-for="(service,index) in adminServices" :key="service.id"><input v-model="service.name" placeholder="項目名稱"><input v-model="service.caption" placeholder="項目說明"><label>分鐘<input v-model.number="service.minutes" type="number" min="30" step="30"></label><label>預估價格<input v-model.number="service.price" type="number" min="0" step="100"></label><label class="price-toggle"><input v-model="service.showPrice" type="checkbox"><span>顯示價格</span></label><button class="danger" @click="adminServices.splice(index,1)">刪除</button></div><button class="primary save-settings" @click="saveServices">儲存項目設定</button><p v-if="adminMessage" class="message">{{ adminMessage }}</p></div>
@@ -168,7 +176,7 @@ onMounted(async()=>{ const savedContact=localStorage.getItem(contactStorageKey);
         </section>
         <div v-if="adminCreate.open" class="admin-overlay"><form class="admin-create-card" @submit.prevent="adminAddBooking"><button type="button" class="admin-close" @click="adminCreate.open=false">×</button><h2>新增時段</h2><div class="mode-switch"><button type="button" :class="{active:adminCreate.mode==='booking'}" @click="adminCreate.mode='booking'">新增預約</button><button type="button" :class="{active:adminCreate.mode==='leave'}" @click="adminCreate.mode='leave'">設定休假</button></div><label>日期<input v-model="adminCreate.date" type="date" required></label><template v-if="adminCreate.mode==='booking'"><label>開始時間<input v-model="adminCreate.startTime" type="time" min="09:00" max="20:00" step="1800" required></label><label>服務項目<select v-model="adminCreate.serviceId" required><option v-for="service in adminServices" :key="service.id" :value="service.id">{{ service.name }}・{{ service.minutes }} 分鐘</option></select></label><div class="two"><label>顧客姓名<input v-model="adminCreate.name" required></label><label>聯絡電話<input v-model="adminCreate.phone"></label></div></template><template v-else><label class="price-toggle"><input v-model="adminCreate.wholeDay" type="checkbox"><span>休一整天（09:00–22:00）</span></label><div v-if="!adminCreate.wholeDay" class="two"><label>開始時間<input v-model="adminCreate.startTime" type="time" min="09:00" max="21:30" step="1800"></label><label>結束時間<input v-model="adminCreate.endTime" type="time" min="09:30" max="22:00" step="1800"></label></div></template><label>備註<input v-model="adminCreate.note" :placeholder="adminCreate.mode==='leave'?'例如：休假、下午有事':''"></label><p v-if="adminMessage" class="message">{{ adminMessage }}</p><button class="primary">{{ adminCreate.mode==='leave'?'儲存休假':'新增預約' }}</button></form></div>
         <div v-if="adminDetail" class="admin-overlay"><section class="admin-detail-card"><button class="admin-close" @click="adminDetail=null">×</button><h2>{{ adminDetail.type==='leave'?'休假詳情':'預約詳情' }}</h2><dl><div><dt>日期</dt><dd>{{ adminDetail.date }}</dd></div><div><dt>時間</dt><dd>{{ adminDetail.startTime }}–{{ adminDetail.endTime }}</dd></div><template v-if="adminDetail.type!=='leave'"><div><dt>服務項目</dt><dd>{{ adminDetail.services.join('、') }}</dd></div><div><dt>顧客姓名</dt><dd>{{ adminDetail.name }}</dd></div><div><dt>聯絡電話</dt><dd>{{ adminDetail.phone || '未填寫' }}</dd></div></template><div><dt>備註</dt><dd>{{ adminDetail.note || '無' }}</dd></div></dl><button class="delete-booking-button" @click="adminDeleteBooking(adminDetail.id)">刪除這筆{{ adminDetail.type==='leave'?'休假':'預約' }}</button></section></div>
-        <div v-if="importSetupOpen" class="admin-overlay"><section class="tool-dialog"><button class="admin-close" :disabled="importing" @click="importSetupOpen=false">×</button><div class="tool-dialog-icon" aria-hidden="true">⇩</div><h2>從 Google 預約表中匯入</h2><p class="muted">資料辨識完成後，會先讓妳確認可匯入與衝突的內容。</p><label>資料年份<input v-model.number="importYear" type="number" min="2020" max="2100" :disabled="importing"></label><div v-if="importProgress.length" class="import-progress" aria-live="polite"><div v-for="item in importProgress" :key="item.id" class="import-progress-item" :class="item.status"><span>{{ item.time }}</span><b>{{ item.message }}</b></div></div><p v-if="importMessage" class="message">{{ importMessage }}</p><div class="dialog-actions"><button :disabled="importing" @click="importSetupOpen=false">取消</button><button class="primary" :disabled="importing" @click="importGoogle">{{ importing?'辨識中…':'開始匯入' }}</button></div></section></div>
+        <div v-if="importSetupOpen" class="admin-overlay"><section class="tool-dialog"><button class="admin-close" :disabled="importing" @click="importSetupOpen=false">×</button><div class="tool-dialog-icon" aria-hidden="true">⇩</div><h2>從 Google 預約表中匯入</h2><p class="muted">建立任務後會在後台執行，下次進入後台仍可看到進度。</p><label>資料年份<input v-model.number="importYear" type="number" min="2020" max="2100" :disabled="importing"></label><div v-if="importProgress.length" class="import-progress" aria-live="polite"><div v-for="item in importProgress" :key="item.id" class="import-progress-item" :class="item.status"><span>{{ item.time }}</span><b>{{ item.message }}</b></div></div><p v-if="importMessage" class="message">{{ importMessage }}</p><div class="dialog-actions"><button :disabled="importing" @click="importSetupOpen=false">關閉</button><button v-if="importTask?.status==='done'&&importTask.records?.length" @click="openImportResult">查看結果</button><button class="primary" :disabled="importing" @click="importGoogle">{{ importing?'同步中…':'開始同步' }}</button></div></section></div>
         <div v-if="exportConfirmOpen" class="admin-overlay"><section class="tool-dialog"><button class="admin-close" @click="exportConfirmOpen=false">×</button><div class="tool-dialog-icon" aria-hidden="true">⇧</div><h2>匯出為 Excel</h2><p class="muted">將目前所有預約與休假資料下載為 Excel 檔案。</p><div class="dialog-actions"><button @click="exportConfirmOpen=false">取消</button><button class="primary" @click="downloadExcel(false)">確認匯出</button></div></section></div>
         <div v-if="importOpen" class="admin-overlay"><section class="import-preview-card"><button class="admin-close" @click="importOpen=false">×</button><h2>確認 Google 匯入資料</h2><p class="muted">衝突資料已優先排列。請確認勾選內容後再匯入。</p><div class="import-summary"><span class="conflict">衝突 {{ importPreview.filter(r=>r.status==='conflict').length }}</span><span>可匯入 {{ importPreview.filter(r=>r.status==='ready').length }}</span><span>重複 {{ importPreview.filter(r=>r.status==='duplicate').length }}</span></div><div class="import-list"><label v-for="record in importPreview" :key="record.tempId" class="import-item" :class="record.status"><input v-model="record.selected" type="checkbox" :disabled="record.status!=='ready'"><span class="import-status">{{ record.status==='conflict'?'有衝突':record.status==='duplicate'?'已存在':'可匯入' }}</span><b>{{ record.date }}　{{ record.startTime }}–{{ record.endTime }}</b><span>{{ record.type==='leave'?'休假':(record.services.join('、')||'未識別項目') }}</span><small>{{ record.note }}</small></label></div><div class="import-actions"><button @click="importOpen=false">取消</button><button class="primary" :disabled="confirmingImport||!importPreview.some(r=>r.selected&&r.status==='ready')" @click="confirmGoogleImport">{{ confirmingImport?'匯入中…':`確認匯入 ${importPreview.filter(r=>r.selected&&r.status==='ready').length} 筆` }}</button></div></section></div>
       </template>

@@ -11,9 +11,11 @@ const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : seed
 const dataFile = path.join(dataDir, 'bookings.json')
 const servicesFile = path.join(dataDir, 'services.json')
 const settingsFile = path.join(dataDir, 'settings.json')
+const importTaskFile = path.join(dataDir, 'import-task.json')
 const app = express()
 const PORT = process.env.PORT || 3001
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fhy'
+const runningImportTasks = new Set()
 
 app.use(express.json())
 
@@ -54,6 +56,17 @@ async function readSettings() {
   }
 }
 async function writeSettings(settings) { await ensureDataDir();const temp=`${settingsFile}.tmp`; await fs.writeFile(temp,JSON.stringify(settings,null,2)); await fs.rename(temp,settingsFile) }
+async function readImportTask() { try{return JSON.parse(await fs.readFile(importTaskFile,'utf8'))}catch(error){if(error.code==='ENOENT')return null;throw error} }
+async function writeImportTask(task) { await ensureDataDir();const temp=`${importTaskFile}.tmp`; await fs.writeFile(temp,JSON.stringify(task,null,2)); await fs.rename(temp,importTaskFile) }
+async function latestImportTask() {
+  const task=await readImportTask()
+  if(task?.status==='running'&&!runningImportTasks.has(task.id)){
+    task.status='error';task.error='上一次同步因服務重啟而中斷，請重新開始同步。';task.updatedAt=new Date().toISOString();task.finishedAt=task.updatedAt
+    task.progress=[...(task.progress||[]),{id:crypto.randomUUID(),message:task.error,status:'error',time:new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}]
+    await writeImportTask(task)
+  }
+  return task
+}
 function isAdmin(req) { return req.headers['x-admin-password'] === ADMIN_PASSWORD }
 
 function minutesOf(value) { const [h, m] = value.split(':').map(Number); return h * 60 + m }
@@ -76,6 +89,49 @@ async function askDeepSeek(prompt){
     return JSON.parse(content)
   }catch(error){lastError=error}
   throw lastError
+}
+
+async function buildGoogleImportRecords({url:rawUrl,year:rawYear,onProgress=()=>{}}){
+  const settings=await readSettings(), url=sheetCsvUrl(rawUrl||settings.googleSheetUrl), year=Number(rawYear)||new Date().getFullYear()
+  if(!url)throw new Error('Google 表格連結格式不正確。')
+  await onProgress('正在讀取 Google 預約表…')
+  const sheetResponse=await fetch(url);if(!sheetResponse.ok)throw new Error('無法讀取 Google 表格，請確認連結可公開檢視。')
+  const csv=await sheetResponse.text(), services=await readServices(), dateLines=csv.split(/\r?\n/).filter(line=>/^\d{1,2}\/\d{1,2},/.test(line.trim()))
+  await onProgress(`已讀取表格，找到 ${dateLines.length} 行日期資料。`)
+  const chunks=[];for(let i=0;i<dateLines.length;i+=5)chunks.push(dateLines.slice(i,i+5).join('\n'))
+  const instructions=`你是台灣美甲預約資料整理助手。把 CSV 轉成 json，年份是 ${year}。只輸出 {"records":[]} JSON。每個有時間的預約是一筆 booking，日期為 YYYY-MM-DD，時間為 HH:mm。services 只能是：${services.map(s=>s.name).join('、')}。手=手部美甲，足=足部美甲，卸=卸甲。endTime 按服務時間加總：${services.map(s=>`${s.name}${s.minutes}分鐘`).join('、')}；項目不明預設 120 分鐘。「休假」「有事」「勿約」轉 leave；沒時間為 09:00–22:00，早上為 09:00–13:00，某時間後到 22:00，明確範圍照原文。name 只填明確人名，否則「Google 匯入」。note 保留原始格文字。不要產生標題或公告。範例：{"records":[{"type":"booking","date":"${year}-07-01","startTime":"10:30","endTime":"13:30","services":["卸甲","手部美甲"],"name":"Google 匯入","note":"10：30卸+手"},{"type":"leave","date":"${year}-07-17","startTime":"09:00","endTime":"22:00","services":[],"name":"休假","note":"休假"}]}`
+  const parsedChunks=[]
+  for(let index=0;index<chunks.length;index++){
+    await onProgress(`正在請 DeepSeek 辨識第 ${index+1}/${chunks.length} 段資料…`)
+    const parsed=await askDeepSeek(`${instructions}\nCSV：\n${chunks[index]}`)
+    parsedChunks.push(parsed)
+    const count=Array.isArray(parsed.records)?parsed.records.length:0
+    await onProgress(`第 ${index+1}/${chunks.length} 段完成，識別 ${count} 筆。`)
+  }
+  await onProgress('正在檢查重複與時段衝突…')
+  const normalized=parsedChunks.flatMap(parsed=>Array.isArray(parsed.records)?parsed.records:[]).map(normalizeAiRecord).filter(Boolean), bookings=await readBookings()
+  const statusOrder={conflict:0,duplicate:1,ready:2}
+  return normalized.map((record,index)=>{const signature=`${record.date}|${record.startTime}|${record.endTime}|${record.type}|${record.note}`;const duplicate=bookings.some(b=>b.importSignature===signature);const conflict=!duplicate&&bookings.some(b=>b.date===record.date&&overlaps(minutesOf(record.startTime),minutesOf(record.endTime),minutesOf(b.startTime),minutesOf(b.endTime)));return {...record,tempId:`import-${index}`,status:duplicate?'duplicate':conflict?'conflict':'ready'}}).sort((a,b)=>statusOrder[a.status]-statusOrder[b.status]||`${a.date}${a.startTime}`.localeCompare(`${b.date}${b.startTime}`))
+}
+
+async function runImportTask(task){
+  runningImportTasks.add(task.id)
+  const progress=async(message,status='working')=>{
+    task.progress.push({id:crypto.randomUUID(),message,status,time:new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit',second:'2-digit'})})
+    task.updatedAt=new Date().toISOString()
+    await writeImportTask(task)
+  }
+  try{
+    await progress('準備開始匯入…')
+    const records=await buildGoogleImportRecords({...task.params,onProgress:progress})
+    task.status='done';task.records=records;task.updatedAt=new Date().toISOString();task.finishedAt=task.updatedAt
+    await progress(`辨識完成，共 ${records.length} 筆。`,'done')
+  }catch(error){
+    task.status='error';task.error=`DeepSeek 匯入失敗：${error.message}`;task.updatedAt=new Date().toISOString();task.finishedAt=task.updatedAt
+    await progress(task.error,'error')
+  }finally{
+    runningImportTasks.delete(task.id)
+  }
 }
 
 app.get('/api/services', async (_req,res)=>res.json(await readServices()))
@@ -107,40 +163,19 @@ app.post('/api/admin/bookings',async(req,res)=>{if(!isAdmin(req))return res.stat
 app.post('/api/admin/leaves',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const{date,startTime='09:00',endTime='22:00',note=''}=req.body;if(!date||minutesOf(startTime)>=minutesOf(endTime))return res.status(400).json({message:'休假時間不正確。'});const bookings=await readBookings();if(bookings.some(b=>b.date===date&&overlaps(minutesOf(startTime),minutesOf(endTime),minutesOf(b.startTime),minutesOf(b.endTime))))return res.status(409).json({message:'這段時間已有預約或休假，請先處理原有資料。'});const leave={id:crypto.randomUUID(),type:'leave',date,startTime,endTime,services:['休假'],name:'休假',phone:'',note:note.trim(),ownerToken:'admin',createdAt:new Date().toISOString()};bookings.push(leave);await writeBookings(bookings);res.status(201).json(leave)})
 app.put('/api/admin/services',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const list=req.body;if(!Array.isArray(list)||list.some(s=>!s.id||!s.name||!Number.isFinite(+s.minutes)||+s.minutes<30||!Number.isFinite(+s.price)||+s.price<0))return res.status(400).json({message:'項目資料不完整。'});await writeServices(list.map(s=>({...s,minutes:+s.minutes,price:+s.price,showPrice:s.showPrice!==false})));res.json(await readServices())})
 app.put('/api/admin/settings',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const current=await readSettings();const next={...current,announcement:String(req.body.announcement||'').trim(),googleSheetUrl:String(req.body.googleSheetUrl||'').trim()};await writeSettings(next);res.json(next)})
+app.get('/api/admin/import-google/latest',async(req,res)=>{
+  if(!isAdmin(req))return res.status(401).json({message:'未授權'})
+  res.json(await latestImportTask())
+})
 app.post('/api/admin/import-google',async(req,res)=>{
   if(!isAdmin(req))return res.status(401).json({message:'未授權'})
   if(!process.env.DEEPSEEK_API_KEY)return res.status(500).json({message:'伺服器尚未設定 DeepSeek API Key。'})
-  res.setHeader('Content-Type','application/x-ndjson; charset=utf-8')
-  res.setHeader('Cache-Control','no-cache, no-transform')
-  res.setHeader('X-Accel-Buffering','no')
-  const send=payload=>res.write(`${JSON.stringify(payload)}\n`)
-  try{
-    const settings=await readSettings(), url=sheetCsvUrl(req.body.url||settings.googleSheetUrl), year=Number(req.body.year)||new Date().getFullYear()
-    if(!url){send({type:'error',message:'Google 表格連結格式不正確。'});return res.end()}
-    send({type:'progress',message:'正在讀取 Google 預約表…'})
-    const sheetResponse=await fetch(url);if(!sheetResponse.ok)throw new Error('無法讀取 Google 表格，請確認連結可公開檢視。')
-    const csv=await sheetResponse.text(), services=await readServices(), dateLines=csv.split(/\r?\n/).filter(line=>/^\d{1,2}\/\d{1,2},/.test(line.trim()))
-    send({type:'progress',message:`已讀取表格，找到 ${dateLines.length} 行日期資料。`})
-    const chunks=[];for(let i=0;i<dateLines.length;i+=5)chunks.push(dateLines.slice(i,i+5).join('\n'))
-    const instructions=`你是台灣美甲預約資料整理助手。把 CSV 轉成 json，年份是 ${year}。只輸出 {"records":[]} JSON。每個有時間的預約是一筆 booking，日期為 YYYY-MM-DD，時間為 HH:mm。services 只能是：${services.map(s=>s.name).join('、')}。手=手部美甲，足=足部美甲，卸=卸甲。endTime 按服務時間加總：${services.map(s=>`${s.name}${s.minutes}分鐘`).join('、')}；項目不明預設 120 分鐘。「休假」「有事」「勿約」轉 leave；沒時間為 09:00–22:00，早上為 09:00–13:00，某時間後到 22:00，明確範圍照原文。name 只填明確人名，否則「Google 匯入」。note 保留原始格文字。不要產生標題或公告。範例：{"records":[{"type":"booking","date":"${year}-07-01","startTime":"10:30","endTime":"13:30","services":["卸甲","手部美甲"],"name":"Google 匯入","note":"10：30卸+手"},{"type":"leave","date":"${year}-07-17","startTime":"09:00","endTime":"22:00","services":[],"name":"休假","note":"休假"}]}`
-    const parsedChunks=[]
-    for(let index=0;index<chunks.length;index++){
-      send({type:'progress',message:`正在請 DeepSeek 辨識第 ${index+1}/${chunks.length} 段資料…`})
-      const parsed=await askDeepSeek(`${instructions}\nCSV：\n${chunks[index]}`)
-      parsedChunks.push(parsed)
-      const count=Array.isArray(parsed.records)?parsed.records.length:0
-      send({type:'progress',message:`第 ${index+1}/${chunks.length} 段完成，識別 ${count} 筆。`})
-    }
-    send({type:'progress',message:'正在檢查重複與時段衝突…'})
-    const normalized=parsedChunks.flatMap(parsed=>Array.isArray(parsed.records)?parsed.records:[]).map(normalizeAiRecord).filter(Boolean), bookings=await readBookings()
-    const statusOrder={conflict:0,duplicate:1,ready:2}
-    const records=normalized.map((record,index)=>{const signature=`${record.date}|${record.startTime}|${record.endTime}|${record.type}|${record.note}`;const duplicate=bookings.some(b=>b.importSignature===signature);const conflict=!duplicate&&bookings.some(b=>b.date===record.date&&overlaps(minutesOf(record.startTime),minutesOf(record.endTime),minutesOf(b.startTime),minutesOf(b.endTime)));return {...record,tempId:`import-${index}`,status:duplicate?'duplicate':conflict?'conflict':'ready'}}).sort((a,b)=>statusOrder[a.status]-statusOrder[b.status]||`${a.date}${a.startTime}`.localeCompare(`${b.date}${b.startTime}`))
-    send({type:'done',message:`辨識完成，共 ${records.length} 筆。`,records})
-  }catch(error){
-    send({type:'error',message:`DeepSeek 匯入失敗：${error.message}`})
-  }finally{
-    res.end()
-  }
+  const latest=await latestImportTask()
+  if(latest?.status==='running')return res.status(409).json({message:'已有同步正在執行中。',task:latest})
+  const task={id:crypto.randomUUID(),status:'running',params:{url:req.body.url||'',year:Number(req.body.year)||new Date().getFullYear()},progress:[],records:[],error:'',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),finishedAt:''}
+  await writeImportTask(task)
+  runImportTask(task).catch(error=>console.error('Google import task failed',error))
+  res.status(202).json(task)
 })
 app.post('/api/admin/confirm-import',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const incoming=Array.isArray(req.body.records)?req.body.records:[],bookings=await readBookings();let imported=0,skipped=0;for(const raw of incoming){const record=normalizeAiRecord(raw);if(!record){skipped++;continue}const signature=`${record.date}|${record.startTime}|${record.endTime}|${record.type}|${record.note}`;if(bookings.some(b=>b.importSignature===signature||(b.date===record.date&&overlaps(minutesOf(record.startTime),minutesOf(record.endTime),minutesOf(b.startTime),minutesOf(b.endTime))))){skipped++;continue}bookings.push({...record,id:crypto.randomUUID(),importSignature:signature,ownerToken:'google-import',createdAt:new Date().toISOString()});imported++}await writeBookings(bookings);res.json({imported,skipped})})
 app.get('/api/admin/export-excel',async(req,res)=>{

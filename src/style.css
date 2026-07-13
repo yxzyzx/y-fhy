@@ -65,6 +65,11 @@ footer a:hover { color: var(--clay); }
 .offline-badge { display: inline-flex; align-items: center; border: 1px solid #d7ae82; border-radius: 999px; background: #fff5e8; color: #956234; padding: 4px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .admin-panel.standalone { width: 100%; max-height: none; overflow: visible; margin-top: 8px; box-shadow: none; border: 1px solid var(--line); }
 .admin-panel.standalone .admin-section.first { margin-top: 0; padding-top: 0; border-top: 0; }
+.import-status-panel { margin: 14px 0 18px; padding: 22px; border: 1px solid #dfe5da; border-radius: 16px; background: #fff; }
+.import-status-panel h2 { font-size: 21px; }
+.import-status-panel p { margin: 6px 0 0; color: #817973; font-size: 12px; }
+.import-status-panel .admin-title button { border: 1px solid #b9c7b0; background: #f8fbf5; color: #627358; border-radius: 9px; padding: 9px 13px; }
+.compact-progress { margin-top: 14px; max-height: 150px; }
 .save-settings { margin-top: 18px; }
 .admin-schedule-section { margin-left: -32px; margin-right: -32px; margin-bottom: -32px; }
 .admin-schedule-head { padding-left: 32px; padding-right: 32px; }
