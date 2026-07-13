@@ -98,6 +98,14 @@ footer a:hover { color: var(--clay); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 5px; }
 .dialog-actions button { border: 1px solid var(--line); border-radius: 9px; padding: 10px 15px; background: #fff; }
 .dialog-actions button.primary { background: var(--clay); color: #fff; border-color: var(--clay); }
+.import-progress { max-height: 210px; overflow: auto; display: grid; gap: 8px; padding: 10px; border: 1px solid #dfe5da; border-radius: 12px; background: #f8faf6; }
+.import-progress-item { position: relative; display: grid; grid-template-columns: 72px 1fr; gap: 9px; align-items: start; color: #615b56; font-size: 12px; }
+.import-progress-item span { color: #9b938d; font-variant-numeric: tabular-nums; }
+.import-progress-item b { font-weight: 600; }
+.import-progress-item.working::before { content: ''; position: absolute; left: 0; top: 5px; width: 7px; height: 7px; border-radius: 999px; background: #74836a; box-shadow: 0 0 0 4px #e7eee1; }
+.import-progress-item.working span { padding-left: 15px; }
+.import-progress-item.done b { color: #55704d; }
+.import-progress-item.error b { color: #994d40; }
 .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 4px; border-radius: 12px; background: #f1f0eb; }
 .mode-switch button { border: 0; background: transparent; padding: 10px; border-radius: 9px; }
 .mode-switch button.active { color: #fff; background: #75806d; }
