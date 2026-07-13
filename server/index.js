@@ -18,9 +18,12 @@ const servicesFile = path.join(dataDir, 'services.json')
 const settingsFile = path.join(dataDir, 'settings.json')
 const importTaskFile = path.join(dataDir, 'import-task.json')
 const pushTokensFile = path.join(dataDir, 'push-tokens.json')
+const mailStateFile = path.join(dataDir, 'mail-state.json')
 const app = express()
 const PORT = process.env.PORT || 3001
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fhy'
+const ADMIN_NOTIFY_EMAIL = process.env.ADMIN_NOTIFY_EMAIL || 'jius10202@gmail.com'
+const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Asia/Taipei'
 const runningImportTasks = new Set()
 let firebaseAppReady = false
 let mailTransporter = null
@@ -68,8 +71,13 @@ async function readImportTask() { try{return JSON.parse(await fs.readFile(import
 async function writeImportTask(task) { await ensureDataDir();const temp=`${importTaskFile}.tmp`; await fs.writeFile(temp,JSON.stringify(task,null,2)); await fs.rename(temp,importTaskFile) }
 async function readPushTokens() { try{const value=JSON.parse(await fs.readFile(pushTokensFile,'utf8'));return Array.isArray(value)?value:[]}catch(error){if(error.code==='ENOENT')return [];throw error} }
 async function writePushTokens(tokens) { await ensureDataDir();const temp=`${pushTokensFile}.tmp`;await fs.writeFile(temp,JSON.stringify(tokens,null,2));await fs.rename(temp,pushTokensFile) }
+async function readMailState() { try{return JSON.parse(await fs.readFile(mailStateFile,'utf8'))}catch(error){if(error.code==='ENOENT')return {};throw error} }
+async function writeMailState(state) { await ensureDataDir();const temp=`${mailStateFile}.tmp`;await fs.writeFile(temp,JSON.stringify(state,null,2));await fs.rename(temp,mailStateFile) }
 function validEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim())
+}
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[<>&"]/g, ch => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[ch]))
 }
 function getMailTransporter() {
   if (mailTransporter) return mailTransporter
@@ -102,7 +110,7 @@ function bookingEmailHtml(booking) {
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Noto Sans TC','Microsoft JhengHei',Arial,sans-serif;line-height:1.8;color:#2f342d">
     <h2 style="margin:0 0 16px;color:#74836a">預約成功</h2>
     <p>妳的預約已成立，以下是預約資訊：</p>
-    <table style="border-collapse:collapse;margin-top:12px">${lines.map(([label,value])=>`<tr><td style="padding:6px 18px 6px 0;color:#747b6f">${label}</td><td style="padding:6px 0;font-weight:600">${String(value).replace(/[<>&"]/g, ch => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[ch]))}</td></tr>`).join('')}</table>
+    <table style="border-collapse:collapse;margin-top:12px">${lines.map(([label,value])=>`<tr><td style="padding:6px 18px 6px 0;color:#747b6f">${label}</td><td style="padding:6px 0;font-weight:600">${escapeHtml(value)}</td></tr>`).join('')}</table>
     <p style="margin-top:18px;color:#747b6f">如需調整或取消預約，請回到預約頁面操作，或使用頁面底部的 LINE 聯絡。</p>
   </div>`
 }
@@ -123,7 +131,7 @@ function bookingEmailPayload(booking) {
     }
   }
 }
-async function sendBookingConfirmationViaEmailService(booking) {
+async function sendEmailViaEmailService(payload) {
   const baseUrl = String(process.env.EMAIL_SERVICE_URL || '').trim().replace(/\/+$/, '')
   if (!baseUrl) return false
   const controller = new AbortController()
@@ -134,33 +142,37 @@ async function sendBookingConfirmationViaEmailService(booking) {
     const res = await fetch(`${baseUrl}/send-booking-email`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(bookingEmailPayload(booking)),
+      body: JSON.stringify(payload),
       signal: controller.signal
     })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(body.message || `Email service returned ${res.status}`)
-    console.info('Email service sent', { bookingId: booking.id, to: String(booking.email || booking.phone).replace(/^(.{2}).*(@.*)$/, '$1***$2'), messageId: body.messageId })
+    console.info('Email service sent', { to: String(payload.to).replace(/^(.{2}).*(@.*)$/, '$1***$2'), messageId: body.messageId })
     return true
   } finally {
     clearTimeout(timer)
   }
 }
-async function sendBookingConfirmation(booking) {
-  const to = booking.email || booking.phone
-  if (!validEmail(to)) return false
-  if (process.env.EMAIL_SERVICE_URL) return sendBookingConfirmationViaEmailService(booking)
+async function sendEmail(payload) {
+  if (!validEmail(payload.to)) return false
+  if (process.env.EMAIL_SERVICE_URL) return sendEmailViaEmailService(payload)
   const transporter = getMailTransporter()
   if (!transporter) return false
-  const payload = bookingEmailPayload(booking)
   const info = await transporter.sendMail({
     from: process.env.SMTP_FROM || `指尖日常 <${process.env.SMTP_USER}>`,
-    to,
+    to: payload.to,
     subject: payload.subject,
     text: payload.text,
     html: payload.html
   })
-  console.info('Email sent', { bookingId: booking.id, to: String(to).replace(/^(.{2}).*(@.*)$/, '$1***$2'), messageId: info.messageId })
+  console.info('Email sent', { to: String(payload.to).replace(/^(.{2}).*(@.*)$/, '$1***$2'), messageId: info.messageId })
   return true
+}
+async function sendBookingConfirmation(booking) {
+  const to = booking.email || booking.phone
+  if (!validEmail(to)) return false
+  const payload = bookingEmailPayload(booking)
+  return sendEmail(payload)
 }
 async function latestImportTask() {
   const task=await readImportTask()
@@ -220,6 +232,96 @@ function overlaps(aStart, aEnd, bStart, bEnd) { return aStart < bEnd && bStart <
 function publicBooking(b) { return { id: b.id, date: b.date, startTime: b.startTime, endTime: b.endTime, services: b.services, displayName: `${b.name.trim().slice(0, 1)}小姐` } }
 function ownerBooking(b) { return { ...publicBooking(b), name: b.name, email: b.email || b.phone || '', phone: b.phone, note: b.note, serviceIds: b.serviceIds || [] } }
 function scheduleBooking(b) { return { id:b.id,date:b.date,startTime:b.startTime,endTime:b.endTime } }
+function bookingDetailText(booking) {
+  return [
+    `日期：${booking.date}`,
+    `時間：${booking.startTime}–${booking.endTime}`,
+    `服務：${(booking.services || []).join('、') || '未填寫'}`,
+    `姓名：${booking.name || '未填寫'}`,
+    `信箱：${booking.email || booking.phone || '未填寫'}`,
+    `備註：${booking.note || '無'}`
+  ].join('\n')
+}
+function bookingDetailHtml(title, booking) {
+  const rows=[
+    ['日期', booking.date],
+    ['時間', `${booking.startTime}–${booking.endTime}`],
+    ['服務', (booking.services || []).join('、') || '未填寫'],
+    ['姓名', booking.name || '未填寫'],
+    ['信箱', booking.email || booking.phone || '未填寫'],
+    ['備註', booking.note || '無']
+  ]
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Noto Sans TC','Microsoft JhengHei',Arial,sans-serif;line-height:1.8;color:#2f342d">
+    <h2 style="margin:0 0 16px;color:#74836a">${escapeHtml(title)}</h2>
+    <table style="border-collapse:collapse">${rows.map(([label,value])=>`<tr><td style="padding:6px 18px 6px 0;color:#747b6f">${label}</td><td style="padding:6px 0;font-weight:600">${escapeHtml(value)}</td></tr>`).join('')}</table>
+  </div>`
+}
+async function sendAdminBookingEmail(event, booking) {
+  if (!validEmail(ADMIN_NOTIFY_EMAIL)) return false
+  const title = event === 'cancelled' ? '有客人取消預約' : '有新的客人預約'
+  return sendEmail({
+    to: ADMIN_NOTIFY_EMAIL,
+    subject: `${title}：${booking.date} ${booking.startTime}`,
+    text: `${title}\n\n${bookingDetailText(booking)}`,
+    html: bookingDetailHtml(title, booking),
+    booking: { id: booking.id, date: booking.date, startTime: booking.startTime, endTime: booking.endTime, services: booking.services || [], name: booking.name || '', note: booking.note || '' }
+  })
+}
+function zonedParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: APP_TIMEZONE, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }).formatToParts(date)
+  return Object.fromEntries(parts.filter(part=>part.type!=='literal').map(part=>[part.type, Number(part.value)]))
+}
+function zonedDateKey(offsetDays = 0, date = new Date()) {
+  const parts = zonedParts(date)
+  const shifted = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + offsetDays))
+  return shifted.toISOString().slice(0, 10)
+}
+function dailySummaryHtml(date, bookings) {
+  const rows = bookings.map(item => `<tr>
+    <td style="padding:8px 12px;border-bottom:1px solid #e8e1dc">${escapeHtml(`${item.startTime}–${item.endTime}`)}</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #e8e1dc">${escapeHtml((item.services || []).join('、'))}</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #e8e1dc">${escapeHtml(item.name || '')}</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #e8e1dc">${escapeHtml(item.email || item.phone || '')}</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #e8e1dc">${escapeHtml(item.note || '')}</td>
+  </tr>`).join('')
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Noto Sans TC','Microsoft JhengHei',Arial,sans-serif;line-height:1.7;color:#2f342d">
+    <h2 style="margin:0 0 16px;color:#74836a">明天預約記錄：${escapeHtml(date)}</h2>
+    ${bookings.length ? `<table style="border-collapse:collapse;width:100%;max-width:860px"><thead><tr style="background:#f4f7f1;color:#5d6756"><th align="left" style="padding:8px 12px">時間</th><th align="left" style="padding:8px 12px">服務</th><th align="left" style="padding:8px 12px">姓名</th><th align="left" style="padding:8px 12px">信箱</th><th align="left" style="padding:8px 12px">備註</th></tr></thead><tbody>${rows}</tbody></table>` : '<p>明天沒有預約。</p>'}
+  </div>`
+}
+async function sendTomorrowSummaryEmail() {
+  if (!validEmail(ADMIN_NOTIFY_EMAIL)) return false
+  const tomorrow = zonedDateKey(1)
+  const bookings = (await readBookings()).filter(item => (item.type || 'booking') !== 'leave' && item.date === tomorrow).sort((a,b)=>a.startTime.localeCompare(b.startTime))
+  const text = bookings.length
+    ? bookings.map(item => `${item.startTime}–${item.endTime} ${item.name || ''} ${(item.services || []).join('、')} ${item.email || item.phone || ''}${item.note ? `｜${item.note}` : ''}`).join('\n')
+    : '明天沒有預約。'
+  return sendEmail({
+    to: ADMIN_NOTIFY_EMAIL,
+    subject: `明天預約記錄：${tomorrow}`,
+    text: `明天預約記錄：${tomorrow}\n\n${text}`,
+    html: dailySummaryHtml(tomorrow, bookings)
+  })
+}
+async function checkDailySummarySchedule() {
+  try {
+    const now = zonedParts()
+    if (now.hour < 22) return
+    const todayKey = zonedDateKey(0)
+    const state = await readMailState()
+    if (state.lastDailySummaryDate === todayKey) return
+    await sendTomorrowSummaryEmail()
+    state.lastDailySummaryDate = todayKey
+    state.lastDailySummarySentAt = new Date().toISOString()
+    await writeMailState(state)
+  } catch (error) {
+    console.error('Daily summary email failed', error)
+  }
+}
+function startDailySummaryScheduler() {
+  checkDailySummarySchedule()
+  setInterval(checkDailySummarySchedule, 60 * 1000)
+}
 function sheetCsvUrl(value) { const match=String(value||'').match(/spreadsheets\/d\/([\w-]+)/); return match ? `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv` : null }
 function normalizeAiRecord(record) {
   const type=record.type==='leave'?'leave':'booking', date=String(record.date||''), startTime=String(record.startTime||''), endTime=String(record.endTime||'')
@@ -335,10 +437,11 @@ app.post('/api/bookings', async (req, res) => {
   bookings.push(booking); await writeBookings(bookings)
   notifyAdmins('有新的客人預約', `${booking.date} ${booking.startTime}–${booking.endTime} ${booking.name} ${booking.services.join('、')}`, {event:'booking_created', bookingId:booking.id}).catch(error=>console.error('Push notification failed',error))
   sendBookingConfirmation(booking).catch(error=>console.error('Email send failed',error))
+  sendAdminBookingEmail('created', booking).catch(error=>console.error('Admin email send failed',error))
   res.status(201).json(ownerBooking(booking))
 })
 
-app.delete('/api/my-bookings/:id',async(req,res)=>{ const token=req.headers['x-owner-token']; const bookings=await readBookings(); const index=bookings.findIndex(b=>b.id===req.params.id&&b.ownerToken===token); if(index<0)return res.status(403).json({message:'無法取消這筆預約。'}); const [removed]=bookings.splice(index,1); await writeBookings(bookings); notifyAdmins('有客人取消預約', `${removed.date} ${removed.startTime}–${removed.endTime} ${removed.name || ''}`, {event:'booking_cancelled', bookingId:removed.id}).catch(error=>console.error('Push notification failed',error)); res.status(204).end() })
+app.delete('/api/my-bookings/:id',async(req,res)=>{ const token=req.headers['x-owner-token']; const bookings=await readBookings(); const index=bookings.findIndex(b=>b.id===req.params.id&&b.ownerToken===token); if(index<0)return res.status(403).json({message:'無法取消這筆預約。'}); const [removed]=bookings.splice(index,1); await writeBookings(bookings); notifyAdmins('有客人取消預約', `${removed.date} ${removed.startTime}–${removed.endTime} ${removed.name || ''}`, {event:'booking_cancelled', bookingId:removed.id}).catch(error=>console.error('Push notification failed',error)); sendAdminBookingEmail('cancelled', removed).catch(error=>console.error('Admin email send failed',error)); res.status(204).end() })
 app.put('/api/my-bookings/:id',async(req,res)=>{const token=req.headers['x-owner-token'];const bookings=await readBookings();const index=bookings.findIndex(b=>b.id===req.params.id&&b.ownerToken===token);if(index<0)return res.status(403).json({message:'無法修改這筆預約。'});const{date,startTime,selectedServices,name,note=''}=req.body;const email=String(req.body.email||req.body.phone||'').trim();const serviceList=await readServices();const serviceMap=Object.fromEntries(serviceList.map(s=>[s.id,s]));if(!date||!startTime||!name?.trim()||!validEmail(email)||!selectedServices?.length||selectedServices.some(id=>!serviceMap[id]))return res.status(400).json({message:'請填寫正確的預約資料。'});const duration=selectedServices.reduce((sum,id)=>sum+serviceMap[id].minutes,0),start=minutesOf(startTime),end=start+duration;if(start<540||start>1200||end>1320)return res.status(400).json({message:'超出可預約時間。'});if(bookings.some((b,i)=>i!==index&&b.date===date&&overlaps(start,end,minutesOf(b.startTime),minutesOf(b.endTime))))return res.status(409).json({message:'這個時段已有其他預約或休假。'});const updated={...bookings[index],date,startTime,endTime:minutesToClock(end),services:selectedServices.map(id=>serviceMap[id].name),serviceIds:selectedServices,name:name.trim(),email,phone:email,note:note.trim(),updatedAt:new Date().toISOString()};bookings[index]=updated;await writeBookings(bookings);res.json(ownerBooking(updated))})
 app.post('/api/admin/login',(req,res)=>req.body.password===ADMIN_PASSWORD?res.json({ok:true}):res.status(401).json({message:'密碼不正確。'}))
 app.post('/api/admin/test-email',async(req,res)=>{
@@ -365,7 +468,7 @@ app.post('/api/admin/push-token',async(req,res)=>{
   res.json({ok:true,enabled:initFirebaseApp(),count:tokens.length})
 })
 app.get('/api/admin/bookings',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});res.json(await readBookings())})
-app.post('/api/admin/bookings',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const{date,startTime,serviceId,name,phone='',note=''}=req.body;const email=String(req.body.email||phone||'').trim();const serviceList=await readServices();const service=serviceList.find(s=>s.id===serviceId);if(!date||!startTime||!service||!name?.trim())return res.status(400).json({message:'請完整填寫預約資料。'});const start=minutesOf(startTime),end=start+service.minutes;if(start<540||start>1200||end>1320)return res.status(400).json({message:'超出可預約時間。'});const bookings=await readBookings();if(bookings.some(b=>b.date===date&&overlaps(start,end,minutesOf(b.startTime),minutesOf(b.endTime))))return res.status(409).json({message:'這個時段已有預約或休假。'});const booking={id:crypto.randomUUID(),type:'booking',date,startTime,endTime:minutesToClock(end),services:[service.name],serviceIds:[service.id],name:name.trim(),email,phone:email||String(phone).trim(),note:note.trim(),ownerToken:'admin',createdAt:new Date().toISOString()};bookings.push(booking);await writeBookings(bookings);if(validEmail(email))sendBookingConfirmation(booking).catch(error=>console.error('Email send failed',error));res.status(201).json(booking)})
+app.post('/api/admin/bookings',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const{date,startTime,serviceId,name,phone='',note=''}=req.body;const email=String(req.body.email||phone||'').trim();const serviceList=await readServices();const service=serviceList.find(s=>s.id===serviceId);if(!date||!startTime||!service||!name?.trim())return res.status(400).json({message:'請完整填寫預約資料。'});const start=minutesOf(startTime),end=start+service.minutes;if(start<540||start>1200||end>1320)return res.status(400).json({message:'超出可預約時間。'});const bookings=await readBookings();if(bookings.some(b=>b.date===date&&overlaps(start,end,minutesOf(b.startTime),minutesOf(b.endTime))))return res.status(409).json({message:'這個時段已有預約或休假。'});const booking={id:crypto.randomUUID(),type:'booking',date,startTime,endTime:minutesToClock(end),services:[service.name],serviceIds:[service.id],name:name.trim(),email,phone:email||String(phone).trim(),note:note.trim(),ownerToken:'admin',createdAt:new Date().toISOString()};bookings.push(booking);await writeBookings(bookings);if(validEmail(email))sendBookingConfirmation(booking).catch(error=>console.error('Email send failed',error));sendAdminBookingEmail('created', booking).catch(error=>console.error('Admin email send failed',error));res.status(201).json(booking)})
 app.post('/api/admin/leaves',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const{date,startTime='09:00',endTime='22:00',note=''}=req.body;if(!date||minutesOf(startTime)>=minutesOf(endTime))return res.status(400).json({message:'休假時間不正確。'});const bookings=await readBookings();if(bookings.some(b=>b.date===date&&overlaps(minutesOf(startTime),minutesOf(endTime),minutesOf(b.startTime),minutesOf(b.endTime))))return res.status(409).json({message:'這段時間已有預約或休假，請先處理原有資料。'});const leave={id:crypto.randomUUID(),type:'leave',date,startTime,endTime,services:['休假'],name:'休假',phone:'',note:note.trim(),ownerToken:'admin',createdAt:new Date().toISOString()};bookings.push(leave);await writeBookings(bookings);res.status(201).json(leave)})
 app.put('/api/admin/services',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const list=req.body;if(!Array.isArray(list)||list.some(s=>!s.id||!s.name||!Number.isFinite(+s.minutes)||+s.minutes<30||!Number.isFinite(+s.price)||+s.price<0))return res.status(400).json({message:'項目資料不完整。'});await writeServices(list.map(s=>({...s,minutes:+s.minutes,price:+s.price,showPrice:s.showPrice!==false})));res.json(await readServices())})
 app.put('/api/admin/settings',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const current=await readSettings();const next={...current,announcement:String(req.body.announcement||'').trim(),googleSheetUrl:String(req.body.googleSheetUrl||'').trim()};await writeSettings(next);res.json(next)})
@@ -405,8 +508,11 @@ app.get('/api/admin/export-excel',async(req,res)=>{
   res.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(`預約資料-${stamp}.xlsx`)}`)
   res.send(Buffer.from(buffer))
 })
-app.delete('/api/admin/bookings/:id',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const bookings=await readBookings();const next=bookings.filter(b=>b.id!==req.params.id);if(next.length===bookings.length)return res.status(404).json({message:'找不到預約'});await writeBookings(next);res.status(204).end()})
+app.delete('/api/admin/bookings/:id',async(req,res)=>{if(!isAdmin(req))return res.status(401).json({message:'未授權'});const bookings=await readBookings();const removed=bookings.find(b=>b.id===req.params.id);const next=bookings.filter(b=>b.id!==req.params.id);if(next.length===bookings.length)return res.status(404).json({message:'找不到預約'});await writeBookings(next);if((removed.type||'booking')!=='leave')sendAdminBookingEmail('cancelled', removed).catch(error=>console.error('Admin email send failed',error));res.status(204).end()})
 
 app.use(express.static(path.join(__dirname, '../dist')))
 app.use((_req, res) => res.sendFile(path.join(__dirname, '../dist/index.html')))
-app.listen(PORT, () => console.log(`API running at http://localhost:${PORT}`))
+app.listen(PORT, () => {
+  console.log(`API running at http://localhost:${PORT}`)
+  startDailySummaryScheduler()
+})
