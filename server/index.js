@@ -80,15 +80,57 @@ function normalizeAiRecord(record) {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^\d{2}:\d{2}$/.test(startTime)||!/^\d{2}:\d{2}$/.test(endTime)||minutesOf(startTime)>=minutesOf(endTime))return null
   return {type,date,startTime,endTime,services:type==='leave'?['休假']:(Array.isArray(record.services)?record.services.map(String):['Google 匯入']),name:type==='leave'?'休假':String(record.name||'Google 匯入'),phone:'',note:String(record.note||record.raw||''),source:'google-sheet'}
 }
+function parseJsonContent(content) {
+  const text = String(content || '').trim()
+  if (!text) throw new Error('DeepSeek 回傳空白內容')
+  try { return JSON.parse(text) } catch {
+    const match = text.match(/\{[\s\S]*\}/)
+    if (match) return JSON.parse(match[0])
+    throw new Error('DeepSeek 回傳內容不是有效 JSON')
+  }
+}
 async function askDeepSeek(prompt){
   let lastError
-  for(let attempt=0;attempt<2;attempt++)try{
-    const response=await fetch('https://api.deepseek.com/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.DEEPSEEK_API_KEY}`},body:JSON.stringify({model:attempt===0?'deepseek-v4-flash':'deepseek-v4-pro',messages:[{role:'user',content:prompt}],response_format:{type:'json_object'},temperature:0,max_tokens:5000})})
-    const body=await response.json();if(!response.ok)throw new Error(body.error?.message||'DeepSeek API 錯誤')
-    const content=body.choices?.[0]?.message?.content;if(!content)throw new Error('DeepSeek 回傳空白內容')
-    return JSON.parse(content)
-  }catch(error){lastError=error}
+  for(let attempt=0;attempt<4;attempt++)try{
+    const useJsonMode=attempt<3
+    const response=await fetch('https://api.deepseek.com/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.DEEPSEEK_API_KEY}`},body:JSON.stringify({model:'deepseek-chat',messages:[{role:'system',content:'你只輸出有效 JSON，不輸出說明文字。'},{role:'user',content:prompt}],...(useJsonMode?{response_format:{type:'json_object'}}:{}),temperature:0,max_tokens:8000})})
+    const raw=await response.text()
+    let body
+    try{body=raw?JSON.parse(raw):{}}catch{throw new Error(`DeepSeek API 回傳格式異常：${raw.slice(0,120)}`)}
+    if(!response.ok)throw new Error(body.error?.message||`DeepSeek API 錯誤（HTTP ${response.status}）`)
+    return parseJsonContent(body.choices?.[0]?.message?.content)
+  }catch(error){
+    lastError=error
+    if(attempt<3)await new Promise(resolve=>setTimeout(resolve, 600*(attempt+1)))
+  }
   throw lastError
+}
+function chunkLabel(chunk) {
+  const dates=chunk.map(line=>line.split(',')[0]?.trim()).filter(Boolean)
+  if(!dates.length)return '這批'
+  return dates.length===1?dates[0]:`${dates[0]}–${dates[dates.length-1]}`
+}
+async function recognizeGoogleImportRows({instructions,dateLines,onProgress}) {
+  await onProgress('正在請 DeepSeek 辨識整份預約表…')
+  try {
+    const parsed=await askDeepSeek(`${instructions}\nCSV：\n${dateLines.join('\n')}`)
+    const count=Array.isArray(parsed.records)?parsed.records.length:0
+    await onProgress(`整份預約表辨識完成，識別 ${count} 筆。`)
+    return [parsed]
+  } catch (error) {
+    await onProgress(`整份辨識失敗，改用較小範圍重試：${error.message}`)
+  }
+  const chunks=[];for(let i=0;i<dateLines.length;i+=2)chunks.push(dateLines.slice(i,i+2))
+  const parsedChunks=[]
+  for(let index=0;index<chunks.length;index++){
+    const label=chunkLabel(chunks[index])
+    await onProgress(`正在辨識 ${label} 的預約資料…`)
+    const parsed=await askDeepSeek(`${instructions}\nCSV：\n${chunks[index].join('\n')}`)
+    parsedChunks.push(parsed)
+    const count=Array.isArray(parsed.records)?parsed.records.length:0
+    await onProgress(`${label} 完成，識別 ${count} 筆。`)
+  }
+  return parsedChunks
 }
 
 async function buildGoogleImportRecords({url:rawUrl,year:rawYear,onProgress=()=>{}}){
@@ -98,16 +140,8 @@ async function buildGoogleImportRecords({url:rawUrl,year:rawYear,onProgress=()=>
   const sheetResponse=await fetch(url);if(!sheetResponse.ok)throw new Error('無法讀取 Google 表格，請確認連結可公開檢視。')
   const csv=await sheetResponse.text(), services=await readServices(), dateLines=csv.split(/\r?\n/).filter(line=>/^\d{1,2}\/\d{1,2},/.test(line.trim()))
   await onProgress(`已讀取表格，找到 ${dateLines.length} 行日期資料。`)
-  const chunks=[];for(let i=0;i<dateLines.length;i+=5)chunks.push(dateLines.slice(i,i+5).join('\n'))
   const instructions=`你是台灣美甲預約資料整理助手。把 CSV 轉成 json，年份是 ${year}。只輸出 {"records":[]} JSON。每個有時間的預約是一筆 booking，日期為 YYYY-MM-DD，時間為 HH:mm。services 只能是：${services.map(s=>s.name).join('、')}。手=手部美甲，足=足部美甲，卸=卸甲。endTime 按服務時間加總：${services.map(s=>`${s.name}${s.minutes}分鐘`).join('、')}；項目不明預設 120 分鐘。「休假」「有事」「勿約」轉 leave；沒時間為 09:00–22:00，早上為 09:00–13:00，某時間後到 22:00，明確範圍照原文。name 只填明確人名，否則「Google 匯入」。note 保留原始格文字。不要產生標題或公告。範例：{"records":[{"type":"booking","date":"${year}-07-01","startTime":"10:30","endTime":"13:30","services":["卸甲","手部美甲"],"name":"Google 匯入","note":"10：30卸+手"},{"type":"leave","date":"${year}-07-17","startTime":"09:00","endTime":"22:00","services":[],"name":"休假","note":"休假"}]}`
-  const parsedChunks=[]
-  for(let index=0;index<chunks.length;index++){
-    await onProgress(`正在請 DeepSeek 辨識第 ${index+1}/${chunks.length} 段資料…`)
-    const parsed=await askDeepSeek(`${instructions}\nCSV：\n${chunks[index]}`)
-    parsedChunks.push(parsed)
-    const count=Array.isArray(parsed.records)?parsed.records.length:0
-    await onProgress(`第 ${index+1}/${chunks.length} 段完成，識別 ${count} 筆。`)
-  }
+  const parsedChunks=await recognizeGoogleImportRows({instructions,dateLines,onProgress})
   await onProgress('正在檢查重複與時段衝突…')
   const normalized=parsedChunks.flatMap(parsed=>Array.isArray(parsed.records)?parsed.records:[]).map(normalizeAiRecord).filter(Boolean), bookings=await readBookings()
   const statusOrder={conflict:0,duplicate:1,ready:2}
